@@ -25,14 +25,16 @@ function base64ToBlob(base64: string, mime: string) {
 }
 
 type Theme = 'vintage' | 'modern'
-type View = 'tracks' | 'playlists' | 'folders' | 'artists' | 'modes' | 'eq' | 'sources' | 'settings'
+type View = 'tracks' | 'playlists' | 'folders' | 'artists' | 'albums' | 'radio' | 'modes' | 'eq' | 'sources' | 'settings'
 type RepeatMode = 'off' | 'one' | 'all'
 type TrackKind = 'music' | 'book'
 type SortMode = 'added' | 'title' | 'artist' | 'source'
+type LibraryKind = 'all' | 'music' | 'book' | 'radio'
 type LibraryLocation = {
   view: View
   query: string
   selectedArtist: string
+  libraryKind: LibraryKind
   activeFolderId: string
   activePlaylistId: string
 }
@@ -54,6 +56,8 @@ type Track = {
   sourcePath?: string
   addedAt: number
 }
+
+type AudioMode = 'music' | 'speech'
 
 type Folder = { id: string; name: string }
 type Playlist = { id: string; name: string; trackIds: string[] }
@@ -606,6 +610,10 @@ export default function App() {
   const audioCtxRef = useRef<AudioContext | null>(null)
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null)
   const filtersRef = useRef<BiquadFilterNode[]>([])
+  const preampRef = useRef<GainNode | null>(null)
+  const loudnessRef = useRef<{ low: BiquadFilterNode; high: BiquadFilterNode } | null>(null)
+  const speechRef = useRef<{ highpass: BiquadFilterNode; presence: BiquadFilterNode; compressor: DynamicsCompressorNode } | null>(null)
+  const monoRef = useRef<GainNode | null>(null)
   const vuAnalyserRef = useRef<{ left: AnalyserNode; right: AnalyserNode } | null>(null)
   const warmthNodesRef = useRef<{ shaper: WaveShaperNode; tone: BiquadFilterNode; crackleGain: GainNode } | null>(null)
   const scrobbleRef = useRef<{ trackId: string; startedAt: number; sent: boolean } | null>(null)
@@ -624,6 +632,7 @@ export default function App() {
   const [sortMode, setSortMode] = useState<SortMode>('added')
   const [query, setQuery] = useState('')
   const [selectedArtist, setSelectedArtist] = useState('')
+  const [libraryKind, setLibraryKind] = useState<LibraryKind>('all')
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -632,6 +641,11 @@ export default function App() {
   const [speed, setSpeed] = useState(1)
   const [repeat, setRepeat] = useState<RepeatMode>('all')
   const [shuffle, setShuffle] = useState(false)
+  const [queueIds, setQueueIds] = useState<string[]>([])
+  const [preamp, setPreamp] = useState(0)
+  const [loudness, setLoudness] = useState(false)
+  const [mono, setMono] = useState(false)
+  const [audioMode, setAudioMode] = useState<AudioMode>('music')
   const [gains, setGains] = useState(defaultGains)
   const [vu, setVu] = useState({ left: 0, right: 0 })
   const [spectrum, setSpectrum] = useState<number[]>(() => Array(20).fill(0))
@@ -668,15 +682,34 @@ export default function App() {
         return `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(q)
       })
       .filter((track) => !selectedArtist || track.artist === selectedArtist)
+      .filter((track) => {
+        if (libraryKind === 'all') return true
+        if (libraryKind === 'radio') return track.source === 'external' && track.duration === 0
+        return track.kind === libraryKind
+      })
       .sort((a, b) => {
         if (sortMode === 'title') return a.title.localeCompare(b.title, 'ru')
         if (sortMode === 'artist') return a.artist.localeCompare(b.artist, 'ru') || a.title.localeCompare(b.title, 'ru')
         if (sortMode === 'source') return a.source.localeCompare(b.source) || a.title.localeCompare(b.title, 'ru')
         return b.addedAt - a.addedAt
       })
-  }, [query, selectedArtist, sortMode, state.activeFolderId, state.activePlaylistId, state.tracks])
+  }, [libraryKind, query, selectedArtist, sortMode, state.activeFolderId, state.activePlaylistId, state.tracks])
 
   const bookTracks = useMemo(() => state.tracks.filter((track) => track.kind === 'book'), [state.tracks])
+  const radioTracks = useMemo(() => state.tracks.filter((track) => track.source === 'external' && track.duration === 0 && track.externalUrl), [state.tracks])
+  const queueTracks = useMemo(() => queueIds.map((id) => state.tracks.find((track) => track.id === id)).filter((track): track is Track => Boolean(track)), [queueIds, state.tracks])
+  const albums = useMemo(() => {
+    const map = new Map<string, { artist: string; album: string; count: number; cover?: string }>()
+    state.tracks.forEach((track) => {
+      if (!track.album) return
+      const key = `${track.artist}\u0000${track.album}`
+      const item = map.get(key) ?? { artist: track.artist, album: track.album, count: 0, cover: track.cover }
+      item.count += 1
+      item.cover = item.cover ?? track.cover
+      map.set(key, item)
+    })
+    return [...map.values()].sort((a, b) => a.album.localeCompare(b.album, 'ru') || a.artist.localeCompare(b.artist, 'ru'))
+  }, [state.tracks])
   const artists = useMemo(() => {
     const map = new Map<string, number>()
     state.tracks.forEach((track) => map.set(track.artist, (map.get(track.artist) ?? 0) + 1))
@@ -753,6 +786,7 @@ export default function App() {
     setView(location.view)
     setQuery(location.query)
     setSelectedArtist(location.selectedArtist)
+    setLibraryKind(location.libraryKind)
     setState((prev) => ({
       ...prev,
       activeFolderId: location.activeFolderId,
@@ -766,6 +800,7 @@ export default function App() {
   const resetLibraryFilters = () => {
     setQuery('')
     setSelectedArtist('')
+    setLibraryKind('all')
     setState((prev) => ({ ...prev, activeFolderId: 'all', activePlaylistId: 'all' }))
   }
 
@@ -784,8 +819,8 @@ export default function App() {
       restoreLocation(history[history.length - 1])
       return
     }
-    if (view !== 'tracks' || query || selectedArtist || state.activeFolderId !== 'all' || state.activePlaylistId !== 'all') {
-      restoreLocation({ view: 'tracks', query: '', selectedArtist: '', activeFolderId: 'all', activePlaylistId: 'all' })
+    if (view !== 'tracks' || query || selectedArtist || libraryKind !== 'all' || state.activeFolderId !== 'all' || state.activePlaylistId !== 'all') {
+      restoreLocation({ view: 'tracks', query: '', selectedArtist: '', libraryKind: 'all', activeFolderId: 'all', activePlaylistId: 'all' })
     }
   }
 
@@ -794,6 +829,7 @@ export default function App() {
       view,
       query,
       selectedArtist,
+      libraryKind,
       activeFolderId: state.activeFolderId,
       activePlaylistId: state.activePlaylistId,
     }
@@ -808,13 +844,13 @@ export default function App() {
       history.push(next)
       if (history.length > 50) history.shift()
     }
-  }, [query, selectedArtist, state.activeFolderId, state.activePlaylistId, view])
+  }, [libraryKind, query, selectedArtist, state.activeFolderId, state.activePlaylistId, view])
 
   useEffect(() => {
     const onNativeBack = () => handleBackNavigation()
     window.addEventListener('nativeback' as keyof WindowEventMap, onNativeBack as EventListener)
     return () => window.removeEventListener('nativeback' as keyof WindowEventMap, onNativeBack as EventListener)
-  }, [detailsTrackId, expandedPlayer, query, selectedArtist, state.activeFolderId, state.activePlaylistId, view])
+  }, [detailsTrackId, expandedPlayer, libraryKind, query, selectedArtist, state.activeFolderId, state.activePlaylistId, view])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setToast(''), 2200)
@@ -904,6 +940,30 @@ export default function App() {
       filter.gain.value = gains[index] ?? 0
     })
   }, [gains])
+
+  useEffect(() => {
+    if (preampRef.current) preampRef.current.gain.value = Math.pow(10, preamp / 20)
+  }, [preamp])
+
+  useEffect(() => {
+    if (!loudnessRef.current) return
+    loudnessRef.current.low.gain.value = loudness ? 4 : 0
+    loudnessRef.current.high.gain.value = loudness ? 2 : 0
+  }, [loudness])
+
+  useEffect(() => {
+    if (!speechRef.current) return
+    speechRef.current.highpass.frequency.value = audioMode === 'speech' ? 120 : 20
+    speechRef.current.presence.gain.value = audioMode === 'speech' ? 4 : 0
+    speechRef.current.compressor.threshold.value = audioMode === 'speech' ? -28 : -6
+    speechRef.current.compressor.ratio.value = audioMode === 'speech' ? 4 : 1.4
+  }, [audioMode])
+
+  useEffect(() => {
+    if (!monoRef.current) return
+    monoRef.current.channelCount = mono ? 1 : 2
+    monoRef.current.channelCountMode = mono ? 'explicit' : 'max'
+  }, [mono])
 
   useEffect(() => {
     applyWarmth(warmth, playing)
@@ -1073,7 +1133,55 @@ export default function App() {
       filter.gain.value = gains[index] ?? 0
       return filter
     })
-    sourceRef.current.connect(filtersRef.current[0])
+    const preampNode = ctx.createGain()
+    preampNode.gain.value = Math.pow(10, preamp / 20)
+    preampRef.current = preampNode
+
+    const loudLow = ctx.createBiquadFilter()
+    loudLow.type = 'lowshelf'
+    loudLow.frequency.value = 110
+    loudLow.gain.value = loudness ? 4 : 0
+    const loudHigh = ctx.createBiquadFilter()
+    loudHigh.type = 'highshelf'
+    loudHigh.frequency.value = 6200
+    loudHigh.gain.value = loudness ? 2 : 0
+    loudnessRef.current = { low: loudLow, high: loudHigh }
+
+    const speechHighpass = ctx.createBiquadFilter()
+    speechHighpass.type = 'highpass'
+    speechHighpass.frequency.value = audioMode === 'speech' ? 120 : 20
+    const speechPresence = ctx.createBiquadFilter()
+    speechPresence.type = 'peaking'
+    speechPresence.frequency.value = 2800
+    speechPresence.Q.value = 1.1
+    speechPresence.gain.value = audioMode === 'speech' ? 4 : 0
+    const speechCompressor = ctx.createDynamicsCompressor()
+    speechCompressor.threshold.value = audioMode === 'speech' ? -28 : -6
+    speechCompressor.knee.value = 18
+    speechCompressor.ratio.value = audioMode === 'speech' ? 4 : 1.4
+    speechCompressor.attack.value = 0.008
+    speechCompressor.release.value = 0.16
+    speechRef.current = { highpass: speechHighpass, presence: speechPresence, compressor: speechCompressor }
+
+    const limiter = ctx.createDynamicsCompressor()
+    limiter.threshold.value = -1
+    limiter.knee.value = 0
+    limiter.ratio.value = 18
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.08
+
+    const monoNode = ctx.createGain()
+    monoNode.channelCount = mono ? 1 : 2
+    monoNode.channelCountMode = mono ? 'explicit' : 'max'
+    monoRef.current = monoNode
+
+    sourceRef.current.connect(preampNode)
+    preampNode.connect(loudLow)
+    loudLow.connect(loudHigh)
+    loudHigh.connect(speechHighpass)
+    speechHighpass.connect(speechPresence)
+    speechPresence.connect(speechCompressor)
+    speechCompressor.connect(filtersRef.current[0])
     filtersRef.current.forEach((filter, index) => {
       const next = filtersRef.current[index + 1]
       if (next) filter.connect(next)
@@ -1089,7 +1197,9 @@ export default function App() {
     tone.Q.value = 0.5
     lastFilter.connect(shaper)
     shaper.connect(tone)
-    tone.connect(ctx.destination)
+    tone.connect(limiter)
+    limiter.connect(monoNode)
+    monoNode.connect(ctx.destination)
 
     const crackle = ctx.createBufferSource()
     crackle.buffer = createCrackleBuffer(ctx)
@@ -1097,7 +1207,7 @@ export default function App() {
     const crackleGain = ctx.createGain()
     crackleGain.gain.value = 0
     crackle.connect(crackleGain)
-    crackleGain.connect(ctx.destination)
+    crackleGain.connect(limiter)
     crackle.start()
     warmthNodesRef.current = { shaper, tone, crackleGain }
 
@@ -1175,6 +1285,13 @@ export default function App() {
   }
 
   const pickNextTrack = (direction: 1 | -1) => {
+    if (direction === 1 && queueIds.length) {
+      const next = state.tracks.find((track) => track.id === queueIds[0])
+      if (next) {
+        setQueueIds((prev) => prev.slice(1))
+        return next
+      }
+    }
     const queue = visibleTracks.length ? visibleTracks : state.tracks
     if (!queue.length) return null
     if (!currentTrack) return queue[0]
@@ -1191,10 +1308,31 @@ export default function App() {
     if (next) await playTrack(next, true)
   }
 
+  const addToQueue = (trackId: string) => {
+    setQueueIds((prev) => [...prev, trackId])
+    setToast('Добавлено в очередь')
+  }
+
+  const removeFromQueue = (index: number) => {
+    setQueueIds((prev) => prev.filter((_, itemIndex) => itemIndex !== index))
+  }
+
+  const playQueuedTrack = async (track: Track, index: number) => {
+    setQueueIds((prev) => prev.filter((_, itemIndex) => itemIndex !== index))
+    await playTrack(track, true)
+  }
+
   const onEnded = () => {
     if (currentTrack?.kind === 'book') persistTrack(currentTrack.id, { position: duration })
     if (repeat === 'one' && currentTrack) {
       void playTrack(currentTrack, false)
+      return
+    }
+    const [queuedId] = queueIds
+    const queuedTrack = queuedId ? state.tracks.find((track) => track.id === queuedId) : null
+    if (queuedTrack) {
+      setQueueIds((prev) => prev.slice(1))
+      void playTrack(queuedTrack, true)
       return
     }
     void skip(1)
@@ -1686,8 +1824,9 @@ export default function App() {
   const navItems: Array<{ id: View; label: string; icon: IconName }> = [
     { id: 'tracks', label: 'Треки', icon: 'music' },
     { id: 'playlists', label: 'Плейлисты', icon: 'list' },
-    { id: 'folders', label: 'Папки', icon: 'folder' },
     { id: 'artists', label: 'Исполнители', icon: 'wave' },
+    { id: 'albums', label: 'Альбомы', icon: 'folder' },
+    { id: 'radio', label: 'Радио', icon: 'wave' },
     { id: 'eq', label: 'EQ', icon: 'sliders' },
     { id: 'settings', label: 'Еще', icon: 'settings' },
   ]
@@ -1828,6 +1967,15 @@ export default function App() {
                 step={0.05}
                 onChange={setWarmth}
               />
+              <Knob
+                label="Preamp"
+                display={`${preamp > 0 ? '+' : ''}${preamp} dB`}
+                value={preamp}
+                min={-9}
+                max={6}
+                step={1}
+                onChange={setPreamp}
+              />
             </div>
             <div className="switch-row">
               <Switch label="Случайно" active={shuffle} onToggle={() => setShuffle((value) => !value)} />
@@ -1842,6 +1990,14 @@ export default function App() {
                 active={currentTrack?.kind === 'book'}
                 disabled={!currentTrack}
                 onToggle={() => currentTrack && persistTrack(currentTrack.id, { kind: currentTrack.kind === 'book' ? 'music' : 'book' })}
+              />
+              <Switch label="Loudness" active={loudness} onToggle={() => setLoudness((value) => !value)} />
+              <Switch label="Mono" active={mono} onToggle={() => setMono((value) => !value)} />
+              <Switch
+                label="Речь"
+                state={audioMode === 'speech' ? 'голос' : 'музыка'}
+                active={audioMode === 'speech'}
+                onToggle={() => setAudioMode((value) => (value === 'speech' ? 'music' : 'speech'))}
               />
             </div>
           </div>
@@ -1874,10 +2030,35 @@ export default function App() {
                 <option value="source">По источнику</option>
               </select>
             </div>
-            {(selectedArtist || query || state.activeFolderId !== 'all' || state.activePlaylistId !== 'all') && (
+            <div className="library-chips" role="group" aria-label="Тип медиатеки">
+              {([
+                ['all', 'Все'],
+                ['music', 'Музыка'],
+                ['book', 'Книги'],
+                ['radio', 'Радио'],
+              ] as const).map(([id, label]) => (
+                <button key={id} className={libraryKind === id ? 'active' : ''} onClick={() => setLibraryKind(id)}>{label}</button>
+              ))}
+            </div>
+            {(selectedArtist || query || libraryKind !== 'all' || state.activeFolderId !== 'all' || state.activePlaylistId !== 'all') && (
               <div className="filter-strip">
-                <span>{selectedArtist ? `Исполнитель: ${selectedArtist}` : query ? `Поиск: ${query}` : 'Фильтр медиатеки'}</span>
+                <span>{selectedArtist ? `Исполнитель: ${selectedArtist}` : query ? `Поиск: ${query}` : libraryKind !== 'all' ? 'Тип медиатеки' : 'Фильтр медиатеки'}</span>
                 <button onClick={resetLibraryFilters}>Все треки</button>
+              </div>
+            )}
+            {queueTracks.length > 0 && (
+              <div className="queue-panel">
+                <div className="queue-head">
+                  <h3>Далее</h3>
+                  <button onClick={() => setQueueIds([])}>Очистить</button>
+                </div>
+                {queueTracks.map((track, index) => (
+                  <div key={`${track.id}-${index}`} className="queue-row">
+                    <button className="plain-icon" onClick={() => void playQueuedTrack(track, index)} aria-label="Играть"><Icon name="play" size={18} /></button>
+                    <span>{track.artist} · {track.title}</span>
+                    <button className="plain-icon" onClick={() => removeFromQueue(index)} aria-label="Убрать"><Icon name="trash" size={18} /></button>
+                  </div>
+                ))}
               </div>
             )}
             {visibleTracks.length === 0 && <div className="empty">Пока пусто. Добавьте аудиофайлы или импортируйте внешний плейлист.</div>}
@@ -1901,6 +2082,7 @@ export default function App() {
                       <option value="">Добавить в плейлист</option>
                       {state.playlists.map((playlist) => <option key={playlist.id} value={playlist.id}>{track.playlistIds.includes(playlist.id) ? '✓ ' : ''}{playlist.name}</option>)}
                     </select>
+                    <button className="ghost" onClick={() => addToQueue(track.id)}><Icon name="next" /> В очередь</button>
                     <button className="ghost" onClick={() => persistTrack(track.id, { kind: track.kind === 'book' ? 'music' : 'book' })}><Icon name={track.kind === 'book' ? 'book' : 'music'} /> {track.kind === 'book' ? 'Книга' : 'Музыка'}</button>
                     <button className="danger text-action" onClick={() => void removeTrack(track)}><Icon name="trash" /> Удалить</button>
                   </div>
@@ -1926,6 +2108,90 @@ export default function App() {
               </button>
             ))}
             {artists.length === 0 && <div className="empty">Исполнители появятся после добавления треков.</div>}
+          </div>
+        </section>
+      )}
+
+      {view === 'albums' && (
+        <section className="workspace album-view">
+          <div className="album-grid">
+            {albums.map((album) => (
+              <button
+                key={`${album.artist}-${album.album}`}
+                className="album-tile"
+                onClick={() => {
+                  setQuery(album.album)
+                  setSelectedArtist('')
+                  setState((prev) => ({ ...prev, activeFolderId: 'all', activePlaylistId: 'all' }))
+                  setView('tracks')
+                }}
+              >
+                <span className="album-cover">{album.cover ? <img src={album.cover} alt="" /> : <Icon name="music" />}</span>
+                <strong>{album.album}</strong>
+                <small>{album.artist} · {album.count}</small>
+              </button>
+            ))}
+            {albums.length === 0 && <div className="empty">Альбомы появятся после добавления треков.</div>}
+          </div>
+        </section>
+      )}
+
+      {view === 'radio' && (
+        <section className="workspace radio-view">
+          <div className="radio-hero">
+            <div>
+              <p className="eyebrow">Live</p>
+              <h2>{currentTrack?.source === 'external' && currentTrack.duration === 0 ? currentTrack.title : 'Радио'}</h2>
+              <p>{currentTrack?.source === 'external' && currentTrack.duration === 0 ? currentTrack.artist : 'Станции, поиск и избранное в одном месте.'}</p>
+            </div>
+            <span className={`power-lamp ${playing && currentTrack?.source === 'external' && currentTrack.duration === 0 ? 'on' : ''}`} aria-hidden />
+          </div>
+          <div className="radio-layout">
+            <div className="source-card">
+              <h2>Поиск станций</h2>
+              <div className="ya-search">
+                <input
+                  value={radioQuery}
+                  onChange={(event) => setRadioQuery(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && radioQuery.trim() && void searchRadio({ name: radioQuery.trim() })}
+                  placeholder="Название станции"
+                />
+                <button disabled={radioBusy} onClick={() => radioQuery.trim() && void searchRadio({ name: radioQuery.trim() })}>
+                  {radioBusy ? '…' : 'Найти'}
+                </button>
+              </div>
+              <div className="radio-tags">
+                {([['джаз', 'jazz'], ['рок', 'rock'], ['ретро', 'oldies'], ['классика', 'classical'], ['лоу-фай', 'lofi'], ['русское', 'russian'], ['новости', 'news']] as const).map(([label, tag]) => (
+                  <button key={tag} disabled={radioBusy} onClick={() => void searchRadio({ tag })}>{label}</button>
+                ))}
+              </div>
+              {radioStations.length > 0 && (
+                <div className="ya-playlists ya-results">
+                  {radioStations.map((station) => (
+                    <button key={station.stationuuid} onClick={() => void addRadioStation(station)}>
+                      <span>{station.name}</span>
+                      <small>{station.bitrate ? `${station.bitrate}k` : station.country}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="source-card">
+              <h2>Мои станции</h2>
+              <div className="radio-station-list">
+                {radioTracks.map((track) => (
+                  <article key={track.id} className={`radio-station ${track.id === currentId ? 'active' : ''}`}>
+                    <button className="plain-icon" onClick={() => void playTrack(track, false)} aria-label="Играть"><Icon name={track.id === currentId && playing ? 'pause' : 'play'} /></button>
+                    <div>
+                      <strong>{track.title}</strong>
+                      <span>{track.artist || track.album}</span>
+                    </div>
+                    <button className="plain-icon" onClick={() => addToQueue(track.id)} aria-label="В очередь"><Icon name="next" size={18} /></button>
+                  </article>
+                ))}
+                {radioTracks.length === 0 && <div className="empty">Найдите станцию и тапните по ней, чтобы добавить.</div>}
+              </div>
+            </div>
           </div>
         </section>
       )}
@@ -2054,6 +2320,12 @@ export default function App() {
                 onToggle={() => setRepeat((value) => (value === 'off' ? 'all' : value === 'all' ? 'one' : 'off'))}
               />
             </div>
+            <div className="quick-actions">
+              {[15, 30, 60].map((minutes) => (
+                <button key={minutes} onClick={() => setSleepUntil(Date.now() + minutes * 60000)}>{minutes} мин</button>
+              ))}
+              <button onClick={() => setSleepUntil(null)}>Без сна</button>
+            </div>
           </div>
           <div className="source-card">
             <h2>Скробблинг</h2>
@@ -2070,6 +2342,9 @@ export default function App() {
           <div className="source-card">
             <h2>Разделы</h2>
             <div className="settings-links">
+              <button onClick={() => setView('albums')}><Icon name="folder" /> Альбомы</button>
+              <button onClick={() => setView('folders')}><Icon name="folder" /> Папки</button>
+              <button onClick={() => setView('radio')}><Icon name="wave" /> Радио</button>
               <button onClick={() => setView('modes')}><Icon name="book" /> Аудиокниги</button>
               <button onClick={() => setView('sources')}><Icon name="plus" /> Источники и импорт</button>
             </div>
@@ -2123,36 +2398,6 @@ export default function App() {
               onChange={(event) => void addScannedWebFiles(event.target.files)}
               {...({ webkitdirectory: 'true' } as object)}
             />
-          </div>
-          <div className="source-card">
-            <h2>Радио</h2>
-            <p>Тап по станции — добавить и слушать.</p>
-            <div className="ya-search">
-              <input
-                value={radioQuery}
-                onChange={(event) => setRadioQuery(event.target.value)}
-                onKeyDown={(event) => event.key === 'Enter' && radioQuery.trim() && void searchRadio({ name: radioQuery.trim() })}
-                placeholder="Название станции"
-              />
-              <button disabled={radioBusy} onClick={() => radioQuery.trim() && void searchRadio({ name: radioQuery.trim() })}>
-                {radioBusy ? '…' : 'Найти'}
-              </button>
-            </div>
-            <div className="radio-tags">
-              {([['джаз', 'jazz'], ['рок', 'rock'], ['ретро', 'oldies'], ['классика', 'classical'], ['лоу-фай', 'lofi'], ['русское', 'russian']] as const).map(([label, tag]) => (
-                <button key={tag} disabled={radioBusy} onClick={() => void searchRadio({ tag })}>{label}</button>
-              ))}
-            </div>
-            {radioStations.length > 0 && (
-              <div className="ya-playlists ya-results">
-                {radioStations.map((station) => (
-                  <button key={station.stationuuid} onClick={() => void addRadioStation(station)}>
-                    <span>{station.name}</span>
-                    <small>{station.bitrate ? `${station.bitrate}k` : station.country}</small>
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
           <div className="source-card">
             <h2>Импорт плейлистов</h2>

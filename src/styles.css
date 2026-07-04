@@ -1070,6 +1070,62 @@ button.active,
   padding: 0 12px;
 }
 
+.library-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-chips button {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+}
+
+.queue-panel {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.queue-head,
+.queue-row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.queue-head h3 {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.queue-head button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.queue-row {
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  min-height: 38px;
+}
+
+.queue-row span {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .add-audio {
   display: inline-flex;
   align-items: center;
@@ -1157,7 +1213,7 @@ button.active,
 .track-actions {
   display: grid;
   grid-column: 1 / -1;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   padding: 8px 0 2px;
 }
@@ -1181,7 +1237,7 @@ button.active,
   left: 10px;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 2px;
   padding: 7px;
   border: 1px solid var(--line);
@@ -1446,6 +1502,118 @@ button.active,
   font-variant-numeric: tabular-nums;
 }
 
+.album-view,
+.radio-view {
+  display: grid;
+  gap: 14px;
+}
+
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.album-tile {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 10px;
+  text-align: left;
+}
+
+.album-cover {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--inset);
+  color: var(--accent);
+}
+
+.album-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.album-tile strong,
+.album-tile small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-tile small {
+  color: var(--muted);
+}
+
+.radio-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 236, 190, 0.05), rgba(0, 0, 0, 0.08)),
+    var(--panel);
+}
+
+.radio-hero h2 {
+  overflow-wrap: anywhere;
+  font-family: var(--display-font);
+  font-size: clamp(1.45rem, 4vw, 2.5rem);
+}
+
+.radio-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.85fr);
+  gap: 14px;
+}
+
+.radio-station-list {
+  display: grid;
+  gap: 8px;
+}
+
+.radio-station {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.radio-station.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent), transparent 90%);
+}
+
+.radio-station div {
+  display: grid;
+  min-width: 0;
+}
+
+.radio-station strong,
+.radio-station span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.radio-station span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 /* ---------- settings / sources ---------- */
 
 .sources-view,
@@ -1462,6 +1630,17 @@ button.active,
 
 .settings-switches {
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.quick-actions button {
+  min-height: 38px;
+  padding: 0 8px;
 }
 
 .settings-links {
@@ -1584,6 +1763,7 @@ button.active,
 @media (max-width: 980px) {
   .deck,
   .tracks-view,
+  .radio-layout,
   .sources-view,
   .settings-view {
     grid-template-columns: 1fr;
@@ -1700,5 +1880,24 @@ button.active,
 
   .book-gauge {
     width: 140px;
+  }
+
+  .quick-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bottom-nav {
+    right: 6px;
+    left: 6px;
+    gap: 0;
+    padding: 6px 4px;
+  }
+
+  .bottom-nav button {
+    min-height: 46px;
+  }
+
+  .bottom-nav span {
+    font-size: 0.56rem;
   }
 }
