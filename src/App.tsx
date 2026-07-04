@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { MediaSession } from '@jofr/capacitor-media-session'
 import { Directory, Filesystem } from '@capacitor/filesystem'
@@ -28,8 +28,9 @@ type Theme = 'vintage' | 'modern'
 type View = 'tracks' | 'playlists' | 'folders' | 'artists' | 'albums' | 'radio' | 'modes' | 'eq' | 'sources' | 'settings'
 type RepeatMode = 'off' | 'one' | 'all'
 type TrackKind = 'music' | 'book'
-type SortMode = 'added' | 'title' | 'artist' | 'source'
+type SortMode = 'added' | 'played' | 'playlist' | 'title' | 'artist' | 'source'
 type LibraryKind = 'all' | 'music' | 'book' | 'radio'
+type ControlStyle = 'knob' | 'slider'
 type LibraryLocation = {
   view: View
   query: string
@@ -53,6 +54,8 @@ type Track = {
   externalUrl?: string
   cover?: string
   position?: number
+  playCount?: number
+  lastPlayedAt?: number
   sourcePath?: string
   addedAt: number
 }
@@ -243,6 +246,25 @@ function Knob({ label, display, value, min, max, step, small, onChange }: KnobPr
   )
 }
 
+function ControlSlider({ label, display, value, min, max, step, onChange }: KnobProps) {
+  return (
+    <label className="control-slider">
+      <span>
+        <b>{display}</b>
+        <small>{label}</small>
+      </span>
+      <input
+        type="range"
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  )
+}
+
 function Switch({ label, state, active, disabled, onToggle }: { label: string; state?: string; active: boolean; disabled?: boolean; onToggle: () => void }) {
   return (
     <button
@@ -354,6 +376,7 @@ type PlayerState = {
   playlists: Playlist[]
   presets: EqPreset[]
   theme: Theme
+  controlStyle: ControlStyle
   activeFolderId: string
   activePlaylistId: string
   yandexBridge: string
@@ -531,8 +554,11 @@ function initialState(): PlayerState {
           title: fixCyrillicMojibake(track.title),
           artist: fixCyrillicMojibake(track.artist),
           album: fixCyrillicMojibake(track.album),
+          playCount: track.playCount ?? 0,
+          lastPlayedAt: track.lastPlayedAt ?? 0,
         })),
         presets: parsed.presets.length ? parsed.presets : factoryPresets,
+        controlStyle: parsed.controlStyle ?? 'knob',
         yandexBridge: parsed.yandexBridge ?? '',
         yandexToken: parsed.yandexToken ?? '',
         listenBrainzToken: parsed.listenBrainzToken ?? '',
@@ -551,6 +577,7 @@ function initialState(): PlayerState {
     playlists: [{ id: playlistId, name: 'Избранное', trackIds: [] }],
     presets: factoryPresets,
     theme: 'vintage',
+    controlStyle: 'knob',
     activeFolderId: 'all',
     activePlaylistId: 'all',
     yandexBridge: '',
@@ -619,6 +646,7 @@ export default function App() {
   const scrobbleRef = useRef<{ trackId: string; startedAt: number; sent: boolean } | null>(null)
   const sleepFadingRef = useRef(false)
   const objectUrlRef = useRef<string | null>(null)
+  const playerSwipeRef = useRef<{ pointerId: number; x: number; y: number; at: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const playlistInputRef = useRef<HTMLInputElement>(null)
   const dirInputRef = useRef<HTMLInputElement>(null)
@@ -668,9 +696,13 @@ export default function App() {
   const [warmth, setWarmth] = useState(0)
 
   const currentTrack = state.tracks.find((track) => track.id === currentId) ?? null
+  const activePlaylist = state.playlists.find((playlist) => playlist.id === state.activePlaylistId)
+  const activePlaylistTrackIds = activePlaylist?.trackIds ?? []
 
   const visibleTracks = useMemo(() => {
     const q = query.trim().toLowerCase()
+    const playlist = state.playlists.find((item) => item.id === state.activePlaylistId)
+    const playlistOrder = new Map((playlist?.trackIds ?? []).map((trackId, index) => [trackId, index]))
     return state.tracks
       .filter((track) => state.activeFolderId === 'all' || track.folderId === state.activeFolderId)
       .filter((track) => {
@@ -688,12 +720,14 @@ export default function App() {
         return track.kind === libraryKind
       })
       .sort((a, b) => {
+        if (sortMode === 'playlist' && playlist) return (playlistOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (playlistOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+        if (sortMode === 'played') return (b.playCount ?? 0) - (a.playCount ?? 0) || (b.lastPlayedAt ?? 0) - (a.lastPlayedAt ?? 0) || b.addedAt - a.addedAt
         if (sortMode === 'title') return a.title.localeCompare(b.title, 'ru')
         if (sortMode === 'artist') return a.artist.localeCompare(b.artist, 'ru') || a.title.localeCompare(b.title, 'ru')
         if (sortMode === 'source') return a.source.localeCompare(b.source) || a.title.localeCompare(b.title, 'ru')
         return b.addedAt - a.addedAt
       })
-  }, [libraryKind, query, selectedArtist, sortMode, state.activeFolderId, state.activePlaylistId, state.tracks])
+  }, [libraryKind, query, selectedArtist, sortMode, state.activeFolderId, state.activePlaylistId, state.playlists, state.tracks])
 
   const bookTracks = useMemo(() => state.tracks.filter((track) => track.kind === 'book'), [state.tracks])
   const radioTracks = useMemo(() => state.tracks.filter((track) => track.source === 'external' && track.duration === 0 && track.externalUrl), [state.tracks])
@@ -1259,6 +1293,14 @@ export default function App() {
     try {
       await audio.play()
       setPlaying(true)
+      setState((prev) => ({
+        ...prev,
+        tracks: prev.tracks.map((item) => (
+          item.id === track.id
+            ? { ...item, playCount: (item.playCount ?? 0) + 1, lastPlayedAt: Date.now() }
+            : item
+        )),
+      }))
       scrobbleRef.current = { trackId: track.id, startedAt: Date.now(), sent: false }
       void submitListen(track, 'playing_now')
     } catch {
@@ -1490,6 +1532,24 @@ export default function App() {
         if (playlist.id !== playlistId) return playlist
         const has = playlist.trackIds.includes(trackId)
         return { ...playlist, trackIds: has ? playlist.trackIds.filter((id) => id !== trackId) : [...playlist.trackIds, trackId] }
+      }),
+    }))
+  }
+
+  const moveTrackInActivePlaylist = (trackId: string, direction: 1 | -1) => {
+    if (state.activePlaylistId === 'all') return
+    setSortMode('playlist')
+    setState((prev) => ({
+      ...prev,
+      playlists: prev.playlists.map((playlist) => {
+        if (playlist.id !== prev.activePlaylistId) return playlist
+        const index = playlist.trackIds.indexOf(trackId)
+        const nextIndex = index + direction
+        if (index < 0 || nextIndex < 0 || nextIndex >= playlist.trackIds.length) return playlist
+        const trackIds = [...playlist.trackIds]
+        const [moved] = trackIds.splice(index, 1)
+        trackIds.splice(nextIndex, 0, moved)
+        return { ...playlist, trackIds }
       }),
     }))
   }
@@ -1818,9 +1878,41 @@ export default function App() {
     setToast(`Обновлено ссылок: ${count}`)
   }
 
+  const onPlayerSwipeStart = (event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement
+    if (target.closest('button, input, select, [role="slider"], .control-board, .timeline')) return
+    playerSwipeRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() }
+  }
+
+  const onPlayerSwipeEnd = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = playerSwipeRef.current
+    playerSwipeRef.current = null
+    if (!start || start.pointerId !== event.pointerId) return
+    const dx = event.clientX - start.x
+    const dy = event.clientY - start.y
+    if (Math.abs(dx) < 72 || Math.abs(dx) < Math.abs(dy) * 1.45 || performance.now() - start.at > 900) return
+    void skip(dx < 0 ? 1 : -1)
+  }
+
   const activePreset = state.presets.find((preset) => preset.gains.every((gain, index) => gain === gains[index]))
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0
   const bookProgress = currentTrack?.kind === 'book' && duration > 0 ? Math.round(progress) : 0
+  const useModernSliders = state.theme === 'modern' && state.controlStyle === 'slider'
+  const playerControls: Array<KnobProps> = [
+    { label: 'Громкость', display: `${Math.round(volume * 100)}%`, value: volume, min: 0, max: 1, step: 0.01, onChange: setVolume },
+    { label: 'Скорость', display: `${speed.toFixed(2)}x`, value: speed, min: 0.5, max: 2, step: 0.05, onChange: setSpeed },
+    {
+      label: 'Сон',
+      display: sleepUntil ? `${Math.max(1, Math.ceil(sleepLeft))} мин` : 'выкл',
+      value: sleepUntil ? Math.min(90, sleepLeft) : 0,
+      min: 0,
+      max: 90,
+      step: 5,
+      onChange: (value) => setSleepUntil(value > 0 ? Date.now() + value * 60000 : null),
+    },
+    { label: 'Прогрев', display: warmth > 0 ? `${Math.round(warmth * 100)}%` : 'выкл', value: warmth, min: 0, max: 1, step: 0.05, onChange: setWarmth },
+    { label: 'Preamp', display: `${preamp > 0 ? '+' : ''}${preamp} dB`, value: preamp, min: -9, max: 6, step: 1, onChange: setPreamp },
+  ]
   const navItems: Array<{ id: View; label: string; icon: IconName }> = [
     { id: 'tracks', label: 'Треки', icon: 'music' },
     { id: 'playlists', label: 'Плейлисты', icon: 'list' },
@@ -1861,6 +1953,9 @@ export default function App() {
       {expandedPlayer && <section
         className={`deck ${state.theme === 'modern' ? 'modern-deck' : 'vintage-deck'}`}
         style={{ '--pulse': ((vu.left + vu.right) / 2).toFixed(3) } as CSSProperties}
+        onPointerDown={onPlayerSwipeStart}
+        onPointerUp={onPlayerSwipeEnd}
+        onPointerCancel={() => { playerSwipeRef.current = null }}
       >
         <div className="cover-stage">
           {state.theme === 'vintage' ? (
@@ -1946,36 +2041,12 @@ export default function App() {
           </div>
 
           <div className="control-board">
-            <div className="knob-row">
-              <Knob label="Громкость" display={`${Math.round(volume * 100)}%`} value={volume} min={0} max={1} step={0.01} onChange={setVolume} />
-              <Knob label="Скорость" display={`${speed.toFixed(2)}x`} value={speed} min={0.5} max={2} step={0.05} onChange={setSpeed} />
-              <Knob
-                label="Сон"
-                display={sleepUntil ? `${Math.max(1, Math.ceil(sleepLeft))} мин` : 'выкл'}
-                value={sleepUntil ? Math.min(90, sleepLeft) : 0}
-                min={0}
-                max={90}
-                step={5}
-                onChange={(value) => setSleepUntil(value > 0 ? Date.now() + value * 60000 : null)}
-              />
-              <Knob
-                label="Прогрев"
-                display={warmth > 0 ? `${Math.round(warmth * 100)}%` : 'выкл'}
-                value={warmth}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={setWarmth}
-              />
-              <Knob
-                label="Preamp"
-                display={`${preamp > 0 ? '+' : ''}${preamp} dB`}
-                value={preamp}
-                min={-9}
-                max={6}
-                step={1}
-                onChange={setPreamp}
-              />
+            <div className={useModernSliders ? 'slider-row' : 'knob-row'}>
+              {playerControls.map((control) => (
+                useModernSliders
+                  ? <ControlSlider key={control.label} {...control} />
+                  : <Knob key={control.label} {...control} />
+              ))}
             </div>
             <div className="switch-row">
               <Switch label="Случайно" active={shuffle} onToggle={() => setShuffle((value) => !value)} />
@@ -2025,6 +2096,8 @@ export default function App() {
               <input className="search" value={query} onChange={(event) => { setQuery(event.target.value); if (selectedArtist) setSelectedArtist('') }} placeholder="Поиск по библиотеке" />
               <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} aria-label="Сортировка">
                 <option value="added">Недавние</option>
+                <option value="played">Самые прослушиваемые</option>
+                <option value="playlist" disabled={state.activePlaylistId === 'all'}>Порядок плейлиста</option>
                 <option value="title">По названию</option>
                 <option value="artist">По исполнителю</option>
                 <option value="source">По источнику</option>
@@ -2082,6 +2155,24 @@ export default function App() {
                       <option value="">Добавить в плейлист</option>
                       {state.playlists.map((playlist) => <option key={playlist.id} value={playlist.id}>{track.playlistIds.includes(playlist.id) ? '✓ ' : ''}{playlist.name}</option>)}
                     </select>
+                    {state.activePlaylistId !== 'all' && (
+                      <>
+                        <button
+                          className="ghost"
+                          disabled={activePlaylistTrackIds.indexOf(track.id) <= 0}
+                          onClick={() => moveTrackInActivePlaylist(track.id, -1)}
+                        >
+                          Выше
+                        </button>
+                        <button
+                          className="ghost"
+                          disabled={activePlaylistTrackIds.indexOf(track.id) < 0 || activePlaylistTrackIds.indexOf(track.id) >= activePlaylistTrackIds.length - 1}
+                          onClick={() => moveTrackInActivePlaylist(track.id, 1)}
+                        >
+                          Ниже
+                        </button>
+                      </>
+                    )}
                     <button className="ghost" onClick={() => addToQueue(track.id)}><Icon name="next" /> В очередь</button>
                     <button className="ghost" onClick={() => persistTrack(track.id, { kind: track.kind === 'book' ? 'music' : 'book' })}><Icon name={track.kind === 'book' ? 'book' : 'music'} /> {track.kind === 'book' ? 'Книга' : 'Музыка'}</button>
                     <button className="danger text-action" onClick={() => void removeTrack(track)}><Icon name="trash" /> Удалить</button>
@@ -2200,9 +2291,9 @@ export default function App() {
         <section className="workspace manager-view">
           <div className="manager wide">
             <h3>Плейлисты</h3>
-            <button className={state.activePlaylistId === 'all' ? 'active' : ''} onClick={() => setState((prev) => ({ ...prev, activePlaylistId: 'all' }))}>Все треки</button>
+            <button className={state.activePlaylistId === 'all' ? 'active' : ''} onClick={() => { setSortMode('added'); setState((prev) => ({ ...prev, activePlaylistId: 'all' })) }}>Все треки</button>
             {state.playlists.map((playlist) => (
-              <button key={playlist.id} className={state.activePlaylistId === playlist.id ? 'active' : ''} onClick={() => setState((prev) => ({ ...prev, activePlaylistId: playlist.id }))}>
+              <button key={playlist.id} className={state.activePlaylistId === playlist.id ? 'active' : ''} onClick={() => { setSortMode('playlist'); setState((prev) => ({ ...prev, activePlaylistId: playlist.id })) }}>
                 <span>{playlist.name}</span>
                 <small>{playlist.trackIds.length}</small>
               </button>
@@ -2307,6 +2398,15 @@ export default function App() {
             <div className="theme-switch settings-switch" role="group" aria-label="Тема">
               <button className={state.theme === 'vintage' ? 'active' : ''} onClick={() => setState((prev) => ({ ...prev, theme: 'vintage' }))}>Винтаж</button>
               <button className={state.theme === 'modern' ? 'active' : ''} onClick={() => setState((prev) => ({ ...prev, theme: 'modern' }))}>Современная</button>
+            </div>
+            <div className="switch-row settings-switches">
+              <Switch
+                label="Ползунки"
+                state={state.controlStyle === 'slider' ? 'modern' : 'ручки'}
+                active={state.controlStyle === 'slider'}
+                disabled={state.theme !== 'modern'}
+                onToggle={() => setState((prev) => ({ ...prev, controlStyle: prev.controlStyle === 'slider' ? 'knob' : 'slider' }))}
+              />
             </div>
           </div>
           <div className="source-card">
