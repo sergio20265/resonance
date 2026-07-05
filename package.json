@@ -1,9 +1,15 @@
 {
   "name": "resonance",
+  "description": "A Capacitor music player for Android with local library management, radio, playlists, EQ, and media-session controls.",
   "private": true,
-  "version": "1.5.0",
+  "version": "1.7.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sergio20265/resonance.git"
+  },
   "scripts": {
+    "postinstall": "patch-package",
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "assets:webp": "node scripts/compress-vintage-assets.mjs",
@@ -24,6 +30,7 @@
     "vite": "^8.0.1"
   },
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "sharp": "^0.35.3"
   }
 }

@@ -1,14 +1,14 @@
-# Мост Яндекс Музыки для Analog Player
+# Yandex Music Bridge for Resonance
 
-Небольшой Python-сервис на [MarshalX/yandex-music-api](https://github.com/MarshalX/yandex-music-api):
-приложение отправляет ему ваш токен, мост возвращает плейлисты и треки, а
-воспроизведение идёт потоком через redirect на прямую ссылку Яндекса.
-Прямые ссылки живут недолго, поэтому мост резолвит их в момент нажатия Play —
-импортированная библиотека не «протухает».
+This directory contains a small Python service based on [`MarshalX/yandex-music-api`](https://github.com/MarshalX/yandex-music-api).
 
-## Запуск
+The Android app sends the bridge a Yandex Music OAuth token. The bridge returns playlists, tracks, search results, and temporary stream redirects. Playback still happens in the app; the bridge only resolves the account library and fresh stream URLs.
 
-Нужен Python 3.10+.
+Yandex Music direct links expire quickly, so the bridge resolves a stream URL right when playback starts. Imported playlists therefore do not become stale just because an old URL expired.
+
+## Run
+
+Python 3.10+ is required.
 
 ```bash
 cd yandex-bridge
@@ -16,40 +16,49 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8977
 ```
 
-Проверка: `http://127.0.0.1:8977/health` → `{"ok": true}`.
+Health check:
 
-## Где взять токен
+```text
+http://127.0.0.1:8977/health
+```
 
-Токен OAuth Яндекс Музыки — инструкция:
+Expected response:
+
+```json
+{"ok": true}
+```
+
+## Token
+
+The bridge requires a Yandex Music OAuth token. The upstream library documents token retrieval here:
+
 https://yandex-music.readthedocs.io/en/main/token.html
 
-Токен вводится в приложении (Ещё → Источники и импорт → Яндекс Музыка) и
-хранится только на устройстве; мост его никуда не записывает (держит в памяти
-для кеша клиента).
+The token is entered in the Android app and stored locally on the device. The bridge keeps it only in memory for client caching and does not write it to disk.
 
-## Подключение в приложении
+## App Setup
 
-1. Запустите мост на компьютере/сервере в той же сети, что и телефон.
-2. В приложении: **Ещё → Источники и импорт → Яндекс Музыка**.
-3. Адрес моста: `http://<IP-компьютера>:8977` (не `127.0.0.1` — телефону нужен IP в сети).
-4. Вставьте токен, нажмите «Показать плейлисты», затем выберите плейлист — он
-   импортируется как локальный плейлист «ЯМ · …».
+1. Run the bridge on a computer or server reachable from the phone on the same network.
+2. In Resonance, open `More -> Sources and import -> Yandex Music`.
+3. Set the bridge URL to `http://<computer-ip>:8977`. Do not use `127.0.0.1` from the phone.
+4. Paste the token, load playlists, then import the playlist you need.
 
-## API (если захочется расширять)
+Imported playlists are stored as local app playlists.
 
-| Метод | Путь | Заголовок/параметр | Ответ |
-|---|---|---|---|
-| GET | `/health` | — | `{"ok": true}` |
-| GET | `/playlists` | `X-Yandex-Token` | `[{kind, title, count}]`, первым идёт `liked` («Мне нравится») |
+## API
+
+| Method | Path | Header or parameter | Response |
+| --- | --- | --- | --- |
+| GET | `/health` | none | `{"ok": true}` |
+| GET | `/playlists` | `X-Yandex-Token` | `[{kind, title, count}]` |
 | GET | `/playlists/{kind}/tracks` | `X-Yandex-Token` | `[{id, title, artists, album, durationMs, cover}]` |
-| GET | `/search?text=` | `X-Yandex-Token` | `{tracks: [...], albums: [{id, title, artists, count, year}]}` |
-| GET | `/albums/{album_id}/tracks` | `X-Yandex-Token` | треки альбома, формат как у плейлиста |
-| GET | `/stream/{track_id}` | `?token=` | 307 redirect на прямой mp3 |
+| GET | `/search?text=` | `X-Yandex-Token` | `{tracks: [...], albums: [...]}` |
+| GET | `/albums/{album_id}/tracks` | `X-Yandex-Token` | album tracks in playlist-track format |
+| GET | `/stream/{track_id}` | `?token=` | `307` redirect to a direct MP3 URL |
 
-## Заметки
+## Notes
 
-- Мост отдаёт только то, что доступно вашему аккаунту (подписка и т.п.) — это
-  личное использование в рамках прав аккаунта.
-- Не выставляйте мост в открытый интернет без авторизации/https: `/stream`
-  принимает токен в query. Для дома в локальной сети — нормально.
-- APK собран с `usesCleartextTraffic` + `allowMixedContent`, http-мост работает.
+- The bridge only exposes content available to the provided account.
+- Do not expose the bridge to the public internet without authentication and HTTPS. The `/stream` endpoint accepts the token as a query parameter.
+- Local-network home usage is the intended setup.
+- The APK allows cleartext traffic so the app can talk to an HTTP bridge on the local network.

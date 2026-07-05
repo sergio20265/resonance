@@ -1,9 +1,14 @@
 package ru.norahobbits.analogplayer;
 
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsetsController;
@@ -24,6 +29,33 @@ public class MainActivity extends BridgeActivity {
         setBlackSystemBars();
         wireNativeBackButton();
         requestMediaPermissions();
+        requestBatteryOptimizationExemption();
+    }
+
+    // Background playback dies when the OS (especially MIUI) freezes or kills the
+    // WebView process; the media notification is then left with dead controls.
+    // Ask once for a battery optimization exemption to keep playback alive.
+    private void requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        if (powerManager == null || powerManager.isIgnoringBatteryOptimizations(getPackageName())) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences("resonance", MODE_PRIVATE);
+        if (prefs.getBoolean("batteryExemptionAsked", false)) {
+            return;
+        }
+        prefs.edit().putBoolean("batteryExemptionAsked", true).apply();
+        try {
+            Intent intent = new Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:" + getPackageName())
+            );
+            startActivity(intent);
+        } catch (Exception ignored) {
+        }
     }
 
     private void setBlackSystemBars() {

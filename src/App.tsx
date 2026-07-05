@@ -640,6 +640,11 @@ async function deleteAudioBlob(key: string) {
 
 export default function App() {
   const audioRef = useRef<HTMLAudioElement>(null)
+  // Live radio streams are cross-origin without CORS, so routing them through the
+  // Web Audio graph (createMediaElementSource) taints the node and outputs silence.
+  // They play on this separate element that bypasses the graph entirely.
+  const radioRef = useRef<HTMLAudioElement>(null)
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null)
   const filtersRef = useRef<BiquadFilterNode[]>([])
@@ -897,21 +902,34 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
+  // A track is live radio when it streams from a remote URL with no known length.
+  const isLiveRadio = (track: Track | null | undefined) => !!track && track.source === 'external' && track.duration === 0
+  // The element currently driving playback (graph element or the radio element).
+  const currentAudio = () => activeAudioRef.current ?? audioRef.current
+
   useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-    audio.volume = volume
-    audio.playbackRate = speed
+    if (audioRef.current) {
+      audioRef.current.volume = volume
+      audioRef.current.playbackRate = speed
+    }
+    // Radio rides its own element; keep the volume in sync but never change the
+    // playback rate of a live stream (it only causes rebuffering).
+    if (radioRef.current) radioRef.current.volume = volume
   }, [speed, volume])
 
   useEffect(() => {
     if (!currentTrack) return
     if (nativeSession) {
+      // The native plugin decodes artwork on a background thread with no timeout
+      // or downsampling; a remote favicon (radio stations) can hang or throw an
+      // uncaught OutOfMemoryError that crashes the app. Only embedded data-URL
+      // covers are safe to hand off natively — remote art is dropped here.
+      const nativeArtwork = currentTrack.cover?.startsWith('data:') ? [{ src: currentTrack.cover }] : []
       void MediaSession.setMetadata({
         title: currentTrack.title,
         artist: currentTrack.artist,
         album: currentTrack.album,
-        artwork: currentTrack.cover ? [{ src: currentTrack.cover }] : [],
+        artwork: nativeArtwork,
       })
       void MediaSession.setPlaybackState({ playbackState: playing ? 'playing' : 'paused' })
       void MediaSession.setActionHandler({ action: 'play' }, () => void resumePlayback())
@@ -919,13 +937,16 @@ export default function App() {
       void MediaSession.setActionHandler({ action: 'previoustrack' }, () => void skip(-1))
       void MediaSession.setActionHandler({ action: 'nexttrack' }, () => void skip(1))
       void MediaSession.setActionHandler({ action: 'seekto' }, (details) => {
-        if (audioRef.current && details.seekTime != null) audioRef.current.currentTime = details.seekTime
+        const audio = currentAudio()
+        if (audio && details.seekTime != null) audio.currentTime = details.seekTime
       })
       void MediaSession.setActionHandler({ action: 'seekbackward' }, () => {
-        if (audioRef.current) audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 15)
+        const audio = currentAudio()
+        if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15)
       })
       void MediaSession.setActionHandler({ action: 'seekforward' }, () => {
-        if (audioRef.current && duration) audioRef.current.currentTime = Math.min(duration, audioRef.current.currentTime + 30)
+        const audio = currentAudio()
+        if (audio && duration) audio.currentTime = Math.min(duration, audio.currentTime + 30)
       })
       return
     }
@@ -947,10 +968,12 @@ export default function App() {
     navigator.mediaSession.setActionHandler('previoustrack', () => void skip(-1))
     navigator.mediaSession.setActionHandler('nexttrack', () => void skip(1))
     navigator.mediaSession.setActionHandler('seekbackward', () => {
-      if (audioRef.current) audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 15)
+      const audio = currentAudio()
+      if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15)
     })
     navigator.mediaSession.setActionHandler('seekforward', () => {
-      if (audioRef.current && duration) audioRef.current.currentTime = Math.min(duration, audioRef.current.currentTime + 30)
+      const audio = currentAudio()
+      if (audio && duration) audio.currentTime = Math.min(duration, audio.currentTime + 30)
     })
   }, [currentTrack, duration, playing])
 
@@ -1005,14 +1028,18 @@ export default function App() {
     monoRef.current.channelCountMode = mono ? 'explicit' : 'max'
   }, [mono])
 
+  // The warmth crackle sounds through the graph's output; keep it silent while a
+  // live radio stream is playing on the bypass element, or it would overlay noise.
+  const graphPlaying = playing && !isLiveRadio(currentTrack)
+
   useEffect(() => {
-    applyWarmth(warmth, playing)
-  }, [warmth, playing])
+    applyWarmth(warmth, graphPlaying)
+  }, [warmth, graphPlaying])
 
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
-    if (!playing || warmth <= 0) {
+    if (!graphPlaying || warmth <= 0) {
       if (!sleepFadingRef.current) {
         audio.playbackRate = speed
         audio.preservesPitch = true
@@ -1035,7 +1062,7 @@ export default function App() {
         audio.preservesPitch = true
       }
     }
-  }, [playing, speed, warmth])
+  }, [graphPlaying, speed, warmth])
 
   useEffect(() => {
     if (!sleepUntil) {
@@ -1047,7 +1074,7 @@ export default function App() {
       setSleepLeft(Math.max(0, leftMs / 60000))
       if (leftMs > 0 || sleepFadingRef.current) return
       sleepFadingRef.current = true
-      const audio = audioRef.current
+      const audio = currentAudio()
       if (!audio || audio.paused) {
         sleepFadingRef.current = false
         setSleepUntil(null)
@@ -1269,10 +1296,17 @@ export default function App() {
   }
 
   const playTrack = async (track: Track, resume = false) => {
-    const audio = audioRef.current
+    const live = isLiveRadio(track)
+    const audio = live ? radioRef.current : audioRef.current
     if (!audio) return
-    initAudioGraph()
-    await audioCtxRef.current?.resume()
+    // Stop whichever element was playing before so two sources never overlap.
+    const previous = live ? audioRef.current : radioRef.current
+    previous?.pause()
+    if (!live) {
+      initAudioGraph()
+      await audioCtxRef.current?.resume()
+    }
+    activeAudioRef.current = audio
 
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current)
@@ -1293,9 +1327,10 @@ export default function App() {
     }
 
     setCurrentId(track.id)
-    audio.playbackRate = speed
+    audio.volume = volume
+    audio.playbackRate = live ? 1 : speed
     audio.load()
-    if (resume && track.position) audio.currentTime = track.position
+    if (resume && track.position && !live) audio.currentTime = track.position
     try {
       await audio.play()
       setPlaying(true)
@@ -1316,7 +1351,7 @@ export default function App() {
   }
 
   const pausePlayback = () => {
-    const audio = audioRef.current
+    const audio = currentAudio()
     if (!audio) return
     audio.pause()
     setPlaying(false)
@@ -1328,14 +1363,18 @@ export default function App() {
   }
 
   const resumePlayback = async () => {
-    const audio = audioRef.current
-    if (!audio) return
     if (!currentTrack) {
       if (visibleTracks[0]) await playTrack(visibleTracks[0], true)
       return
     }
-    initAudioGraph()
-    await audioCtxRef.current?.resume()
+    const live = isLiveRadio(currentTrack)
+    const audio = live ? radioRef.current : audioRef.current
+    if (!audio) return
+    if (!live) {
+      initAudioGraph()
+      await audioCtxRef.current?.resume()
+    }
+    activeAudioRef.current = audio
     if (!audio.src) {
       await playTrack(currentTrack, true)
       return
@@ -1445,7 +1484,7 @@ export default function App() {
   }
 
   const onTimeUpdate = () => {
-    const audio = audioRef.current
+    const audio = currentAudio()
     if (!audio) return
     setCurrentTime(audio.currentTime)
     setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
@@ -1621,7 +1660,7 @@ export default function App() {
   const removeTrack = async (track: Track) => {
     if (track.audioKey) await deleteAudioBlob(track.audioKey)
     if (currentId === track.id) {
-      audioRef.current?.pause()
+      currentAudio()?.pause()
       setCurrentId(null)
       setPlaying(false)
     }
@@ -1990,6 +2029,7 @@ export default function App() {
   return (
     <main className="player-app">
       <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onLoadedMetadata={onTimeUpdate} onEnded={onEnded} onPause={() => setPlaying(false)} onPlay={() => setPlaying(true)} />
+      <audio ref={radioRef} onTimeUpdate={onTimeUpdate} onLoadedMetadata={onTimeUpdate} onEnded={onEnded} onPause={() => setPlaying(false)} onPlay={() => setPlaying(true)} />
 
       <header className="topbar">
         <div>
@@ -2097,7 +2137,8 @@ export default function App() {
               current={Math.min(currentTime, duration || 0)}
               duration={duration}
               onSeek={(time) => {
-                if (audioRef.current) audioRef.current.currentTime = time
+                const audio = currentAudio()
+                if (audio) audio.currentTime = time
                 setCurrentTime(time)
               }}
             />
@@ -2467,9 +2508,9 @@ export default function App() {
               <h2>{currentTrack?.kind === 'book' ? currentTrack.title : 'Выберите аудиокнигу'}</h2>
               <p>Позиция сохраняется автоматически.</p>
               <div className="book-controls">
-                <button onClick={() => audioRef.current && (audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 15))}>-15 сек</button>
+                <button onClick={() => { const audio = currentAudio(); if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15) }}>-15 сек</button>
                 <button onClick={() => setGains(factoryPresets.find((preset) => preset.id === 'book')?.gains ?? defaultGains)}>Голосовой EQ</button>
-                <button onClick={() => audioRef.current && (audioRef.current.currentTime = Math.min(duration, audioRef.current.currentTime + 30))}>+30 сек</button>
+                <button onClick={() => { const audio = currentAudio(); if (audio) audio.currentTime = Math.min(duration, audio.currentTime + 30) }}>+30 сек</button>
               </div>
             </div>
           </div>
