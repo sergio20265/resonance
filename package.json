@@ -4,6 +4,18 @@
   "private": true,
   "version": "1.7.0",
   "type": "module",
+  "keywords": [
+    "android",
+    "music-player",
+    "capacitor",
+    "react",
+    "typescript",
+    "vite",
+    "audio",
+    "radio",
+    "playlists",
+    "equalizer"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/sergio20265/resonance.git"
