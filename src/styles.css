@@ -56,6 +56,19 @@ body {
   color: var(--text);
 }
 
+html,
+body,
+* {
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 @property --cover-a {
   syntax: '<color>';
   inherits: true;
@@ -126,6 +139,16 @@ button {
   border-radius: 0;
   background: transparent;
   color: var(--text);
+}
+
+.icon-button svg,
+.plain-icon svg,
+.bottom-nav svg,
+.text-action svg,
+.ghost svg,
+.mini-cover svg {
+  display: block;
+  flex: 0 0 auto;
 }
 
 .icon-button:hover,
@@ -1210,6 +1233,10 @@ button.active,
   border-radius: 50%;
 }
 
+.row-play svg {
+  transform: translateX(1px);
+}
+
 .mini-cover {
   display: grid;
   width: 46px;
@@ -1221,6 +1248,10 @@ button.active,
   color: #241708;
   font-size: 0.74rem;
   font-weight: 900;
+}
+
+.mini-cover svg {
+  transform: translateY(1px);
 }
 
 .mini-cover img {
@@ -1271,9 +1302,49 @@ button.active,
   padding: 8px 0 2px;
 }
 
+.metadata-editor {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.metadata-editor label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.metadata-editor span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.metadata-editor input {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
 .track-actions select,
+.track-actions input,
 .track-actions button {
   min-height: 38px;
+}
+
+.track-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
 }
 
 .text-action {
@@ -1304,14 +1375,21 @@ button.active,
 
 .bottom-nav button {
   display: grid;
+  grid-template-rows: 24px 13px;
   min-width: 0;
   min-height: 48px;
-  place-items: center;
+  align-content: center;
+  justify-items: center;
   gap: 2px;
   padding: 4px 2px;
   border: 0;
   background: transparent;
   color: var(--muted);
+}
+
+.bottom-nav svg {
+  width: 23px;
+  height: 23px;
 }
 
 .bottom-nav button.active {

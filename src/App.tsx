@@ -70,7 +70,7 @@ type YaTrack = { id: string; title: string; artists: string; album: string; dura
 type YaAlbum = { id: string; title: string; artists: string; count: number | null; year: number | null }
 type RadioStation = { stationuuid: string; name: string; url_resolved: string; favicon: string; country: string; bitrate: number }
 
-type IconName = 'play' | 'pause' | 'prev' | 'next' | 'more' | 'music' | 'book' | 'trash' | 'plus' | 'sliders' | 'settings' | 'list' | 'folder' | 'wave' | 'shuffle' | 'repeat'
+type IconName = 'play' | 'pause' | 'prev' | 'next' | 'more' | 'music' | 'book' | 'trash' | 'plus' | 'sliders' | 'settings' | 'list' | 'folder' | 'wave' | 'shuffle' | 'repeat' | 'share'
 
 function Icon({ name, size = 22 }: { name: IconName; size?: number }) {
   const common = {
@@ -115,6 +115,8 @@ function Icon({ name, size = 22 }: { name: IconName; size?: number }) {
       return <svg {...common}><path d="M4 7h3c3 0 4 10 7 10h6M17 14l3 3-3 3M4 17h3c1.2 0 2-.7 2.7-1.7M14.5 7H20M17 4l3 3-3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
     case 'repeat':
       return <svg {...common}><path d="M17 2.5 20.5 6 17 9.5M3.5 11V9a3 3 0 0 1 3-3h14M7 21.5 3.5 18 7 14.5M20.5 13v2a3 3 0 0 1-3 3h-14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    case 'share':
+      return <svg {...common}><path d="M8.5 12.5 15.5 16.5M15.5 7.5 8.5 11.5M7 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM17 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM17 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
     default:
       return null
   }
@@ -414,6 +416,10 @@ function formatTime(seconds: number) {
 
 function trackName(fileName: string) {
   return fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim()
+}
+
+function safeFileName(value: string) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1f]+/g, ' ').replace(/\s+/g, ' ').trim() || 'track'
 }
 
 function decodeSynchsafe(bytes: Uint8Array) {
@@ -908,8 +914,8 @@ export default function App() {
         artwork: currentTrack.cover ? [{ src: currentTrack.cover }] : [],
       })
       void MediaSession.setPlaybackState({ playbackState: playing ? 'playing' : 'paused' })
-      void MediaSession.setActionHandler({ action: 'play' }, () => void togglePlay())
-      void MediaSession.setActionHandler({ action: 'pause' }, () => void togglePlay())
+      void MediaSession.setActionHandler({ action: 'play' }, () => void resumePlayback())
+      void MediaSession.setActionHandler({ action: 'pause' }, () => pausePlayback())
       void MediaSession.setActionHandler({ action: 'previoustrack' }, () => void skip(-1))
       void MediaSession.setActionHandler({ action: 'nexttrack' }, () => void skip(1))
       void MediaSession.setActionHandler({ action: 'seekto' }, (details) => {
@@ -936,8 +942,8 @@ export default function App() {
         : [],
     })
     navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'
-    navigator.mediaSession.setActionHandler('play', () => void togglePlay())
-    navigator.mediaSession.setActionHandler('pause', () => void togglePlay())
+    navigator.mediaSession.setActionHandler('play', () => void resumePlayback())
+    navigator.mediaSession.setActionHandler('pause', () => pausePlayback())
     navigator.mediaSession.setActionHandler('previoustrack', () => void skip(-1))
     navigator.mediaSession.setActionHandler('nexttrack', () => void skip(1))
     navigator.mediaSession.setActionHandler('seekbackward', () => {
@@ -1309,21 +1315,54 @@ export default function App() {
     }
   }
 
-  const togglePlay = async () => {
+  const pausePlayback = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.pause()
+    setPlaying(false)
+    if (nativeSession) {
+      void MediaSession.setPlaybackState({ playbackState: 'paused' })
+    } else if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'paused'
+    }
+  }
+
+  const resumePlayback = async () => {
     const audio = audioRef.current
     if (!audio) return
     if (!currentTrack) {
       if (visibleTracks[0]) await playTrack(visibleTracks[0], true)
       return
     }
-    if (playing) {
-      audio.pause()
-      setPlaying(false)
+    initAudioGraph()
+    await audioCtxRef.current?.resume()
+    if (!audio.src) {
+      await playTrack(currentTrack, true)
       return
     }
-    await audioCtxRef.current?.resume()
-    await audio.play()
-    setPlaying(true)
+    try {
+      await audio.play()
+      setPlaying(true)
+      if (nativeSession) {
+        void MediaSession.setPlaybackState({ playbackState: 'playing' })
+      } else if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing'
+      }
+    } catch {
+      await playTrack(currentTrack, true)
+    }
+  }
+
+  const togglePlay = async () => {
+    if (!currentTrack) {
+      if (visibleTracks[0]) await playTrack(visibleTracks[0], true)
+      return
+    }
+    if (playing) {
+      pausePlayback()
+      return
+    }
+    await resumePlayback()
   }
 
   const pickNextTrack = (direction: 1 | -1) => {
@@ -1353,6 +1392,31 @@ export default function App() {
   const addToQueue = (trackId: string) => {
     setQueueIds((prev) => [...prev, trackId])
     setToast('Добавлено в очередь')
+  }
+
+  const shareTrack = async (track: Track) => {
+    const title = `${track.artist} - ${track.title}`
+    const text = track.album ? `${title}\n${track.album}` : title
+    try {
+      if (track.source === 'local' && track.audioKey) {
+        const blob = await loadAudioBlob(track.audioKey)
+        if (blob) {
+          const ext = track.sourcePath?.match(/\.([a-z0-9]+)$/i)?.[1] ?? (blob.type.includes('mpeg') ? 'mp3' : 'audio')
+          const file = new File([blob], `${safeFileName(title)}.${ext}`, { type: blob.type || 'audio/*' })
+          if (navigator.canShare?.({ files: [file] })) {
+            await navigator.share({ title, text, files: [file] })
+            return
+          }
+        }
+      }
+      if (navigator.share) {
+        await navigator.share({ title, text, url: track.externalUrl })
+        return
+      }
+      await navigator.clipboard?.writeText(track.externalUrl ? `${text}\n${track.externalUrl}` : text)
+      setToast('Данные трека скопированы')
+    } catch {
+    }
   }
 
   const removeFromQueue = (index: number) => {
@@ -2148,6 +2212,35 @@ export default function App() {
                 <button className="plain-icon row-more" aria-label="Действия" onClick={() => setDetailsTrackId((id) => id === track.id ? null : track.id)}><Icon name="more" /></button>
                 {detailsTrackId === track.id && (
                   <div className="track-actions">
+                    <div className="metadata-editor">
+                      <label>
+                        <span>Название</span>
+                        <input
+                          value={track.title}
+                          onChange={(event) => persistTrack(track.id, { title: event.target.value.trimStart() })}
+                          onBlur={(event) => {
+                            const value = event.target.value.trim()
+                            persistTrack(track.id, { title: value || trackName(track.sourcePath || track.title) || 'Без названия' })
+                          }}
+                        />
+                      </label>
+                      <label>
+                        <span>Исполнитель</span>
+                        <input
+                          value={track.artist}
+                          onChange={(event) => persistTrack(track.id, { artist: event.target.value.trimStart() })}
+                          onBlur={(event) => persistTrack(track.id, { artist: event.target.value.trim() || 'Неизвестный исполнитель' })}
+                        />
+                      </label>
+                      <label>
+                        <span>Альбом</span>
+                        <input
+                          value={track.album}
+                          onChange={(event) => persistTrack(track.id, { album: event.target.value.trimStart() })}
+                          onBlur={(event) => persistTrack(track.id, { album: event.target.value.trim() || 'Локальные файлы' })}
+                        />
+                      </label>
+                    </div>
                     <select value={track.folderId} onChange={(event) => persistTrack(track.id, { folderId: event.target.value })} aria-label="Папка">
                       {state.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
                     </select>
@@ -2174,6 +2267,7 @@ export default function App() {
                       </>
                     )}
                     <button className="ghost" onClick={() => addToQueue(track.id)}><Icon name="next" /> В очередь</button>
+                    <button className="ghost text-action" onClick={() => void shareTrack(track)}><Icon name="share" /> Поделиться</button>
                     <button className="ghost" onClick={() => persistTrack(track.id, { kind: track.kind === 'book' ? 'music' : 'book' })}><Icon name={track.kind === 'book' ? 'book' : 'music'} /> {track.kind === 'book' ? 'Книга' : 'Музыка'}</button>
                     <button className="danger text-action" onClick={() => void removeTrack(track)}><Icon name="trash" /> Удалить</button>
                   </div>
